@@ -743,11 +743,13 @@ app.get('/status', (req, res) => {
 
 // ===== START SERVER =====
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0'; // Bind to all interfaces
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
     console.log(`\n🎮 Ludo Socket.IO Server`);
-    console.log(`📡 Server running on port ${PORT}`);
-    console.log(`🌐 http://localhost:${PORT}\n`);
+    console.log(`📡 Server running on ${HOST}:${PORT}`);
+    console.log(`🌐 http://localhost:${PORT}`);
+    console.log(`🌍 External: http://103.231.190.56:${PORT}\n`);
 });
 
 // ===== GRACEFUL SHUTDOWN =====
