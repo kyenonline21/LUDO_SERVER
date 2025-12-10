@@ -599,8 +599,8 @@ io.on('connection', (socket) => {
     // ===== CHAT & SOCIAL =====
     socket.on('user_chat', (data) => {
         try {
-            const { room_id, peer_id, message } = JSON.parse(data);
-            socket.to(room_id).emit('user_chat', JSON.stringify({ peer_id, message }));
+            const { room_id, peer_id, chat_text } = JSON.parse(data);
+            socket.to(room_id).emit('user_chat', JSON.stringify({ peer_id, chat_text }));
         } catch (error) {
             console.error('[CHAT] Error:', error);
         }
