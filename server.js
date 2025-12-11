@@ -125,10 +125,45 @@ function startTurnTimer(room) {
             if (currentPlayer.numoftimeout >= 3) {
                 currentPlayer.status = PLAYER_STATUS.TIMEOUT;
                 io.to(room.roomId).emit('user_timeout', JSON.stringify(currentPlayer.peerId));
-                // console.log(`[TIMEOUT] Player ${currentPlayer.userName} marked as timeout`);
+                console.log(`[TIMEOUT] Player ${currentPlayer.userName} (peer ${currentPlayer.peerId}) marked as timeout after 3 strikes`);
+
+                // Check if only 1 player remaining after timeout
+                const activeCount = room.players.filter(p => p.status === PLAYER_STATUS.PLAYING).length;
+                console.log(`[TIMEOUT_CHECK] Active players remaining: ${activeCount}`);
+
+                if (activeCount === 1) {
+                    // Find the last remaining player
+                    const winner = room.players.find(p => p.status === PLAYER_STATUS.PLAYING);
+                    if (winner) {
+                        winner.status = PLAYER_STATUS.WIN;
+                        console.log(`[AUTO_WIN] Player ${winner.userName} (peer ${winner.peerId}) wins - all opponents timeout`);
+
+                        // Send win notification to all players
+                        io.to(room.roomId).emit('win_game', JSON.stringify(winner.peerId));
+
+                        // End game
+                        clearTurnTimer(room);
+                        room.status = GAME_STATUS.FINISHED;
+
+                        // Send game over
+                        setTimeout(() => {
+                            io.to(room.roomId).emit('game_over', JSON.stringify({
+                                reason: 'Winner by timeout',
+                                winner_peer_id: winner.peerId
+                            }));
+                        }, 2000); // Give 2 seconds to show win animation
+
+                        return; // Don't continue to turn change
+                    }
+                } else if (activeCount === 0) {
+                    // All players timeout
+                    clearTurnTimer(room);
+                    io.to(room.roomId).emit('game_over', JSON.stringify({ reason: 'All players timeout' }));
+                    return;
+                }
             }
 
-            // Auto change turn
+            // Auto change turn (only if game not ended)
             const nextTurn = getNextTurn(room);
             if (nextTurn !== -1) {
                 room.currentTurn = nextTurn;
@@ -140,7 +175,8 @@ function startTurnTimer(room) {
                 startTurnTimer(room);
             } else {
                 // No active players - game over
-                io.to(room.roomId).emit('game_over', JSON.stringify({ reason: 'All players timeout' }));
+                clearTurnTimer(room);
+                io.to(room.roomId).emit('game_over', JSON.stringify({ reason: 'No active players' }));
             }
         }
     }, TURN_TIMEOUT);
