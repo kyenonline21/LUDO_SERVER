@@ -145,12 +145,11 @@ function startTurnTimer(room) {
                         clearTurnTimer(room);
                         room.status = GAME_STATUS.FINISHED;
 
-                        // Send game over
+                        // Send game over with full ranking
                         setTimeout(() => {
-                            io.to(room.roomId).emit('game_over', JSON.stringify({
-                                reason: 'Winner by timeout',
-                                winner_peer_id: winner.peerId
-                            }));
+                            const results = calculateGameResults(room);
+                            io.to(room.roomId).emit('game_over', JSON.stringify(results));
+                            console.log(`[GAME_OVER] Results: ${JSON.stringify(results)}`);
                         }, 2000); // Give 2 seconds to show win animation
 
                         return; // Don't continue to turn change
@@ -158,7 +157,9 @@ function startTurnTimer(room) {
                 } else if (activeCount === 0) {
                     // All players timeout
                     clearTurnTimer(room);
-                    io.to(room.roomId).emit('game_over', JSON.stringify({ reason: 'All players timeout' }));
+                    const results = calculateGameResults(room);
+                    io.to(room.roomId).emit('game_over', JSON.stringify(results));
+                    console.log(`[GAME_OVER] All timeout - Results: ${JSON.stringify(results)}`);
                     return;
                 }
             }
@@ -176,7 +177,9 @@ function startTurnTimer(room) {
             } else {
                 // No active players - game over
                 clearTurnTimer(room);
-                io.to(room.roomId).emit('game_over', JSON.stringify({ reason: 'No active players' }));
+                const results = calculateGameResults(room);
+                io.to(room.roomId).emit('game_over', JSON.stringify(results));
+                console.log(`[GAME_OVER] No active players - Results: ${JSON.stringify(results)}`);
             }
         }
     }, TURN_TIMEOUT);
@@ -187,6 +190,49 @@ function clearTurnTimer(room) {
         clearTimeout(room.turnTimer);
         room.turnTimer = null;
     }
+}
+
+function calculateGameResults(room) {
+    // Calculate rankings and winning coins
+    const betAmount = room.betAmount;
+    const playerCount = room.maxPlayers;
+
+    // Sort players: WIN first, then PLAYING, then TIMEOUT/LEFT
+    const sortedPlayers = [...room.players].sort((a, b) => {
+        if (a.status === PLAYER_STATUS.WIN && b.status !== PLAYER_STATUS.WIN) return -1;
+        if (a.status !== PLAYER_STATUS.WIN && b.status === PLAYER_STATUS.WIN) return 1;
+        return 0;
+    });
+
+    // Calculate winning coins based on ranking
+    const results = sortedPlayers.map((player, index) => {
+        let winning_coin = 0;
+        let player_rank = index + 1;
+
+        if (player.status === PLAYER_STATUS.WIN) {
+            if (playerCount === 2) {
+                // 2 players: Winner gets 2x bet
+                winning_coin = betAmount * 2;
+            } else if (playerCount === 4) {
+                // 4 players: 1st gets 3x, 2nd gets 1x
+                if (player_rank === 1) {
+                    winning_coin = betAmount * 3;
+                } else if (player_rank === 2) {
+                    winning_coin = betAmount;
+                }
+            }
+        }
+
+        return {
+            user_name: player.userName,
+            user_id: player.userId,
+            winning_coin: winning_coin,
+            player_rank: player_rank,
+            player_status: player.status
+        };
+    });
+
+    return results;
 }
 
 // ===== SOCKET.IO CONNECTION =====
@@ -569,15 +615,10 @@ io.on('connection', (socket) => {
                 // Clear turn timer when game ends
                 clearTurnTimer(room);
 
-                // Calculate results and emit game over
-                const results = room.players.map(p => ({
-                    peer_id: p.peerId,
-                    user_id: p.userId,
-                    user_name: p.userName,
-                    status: p.status
-                }));
+                // Calculate results with ranking and winning coins
+                const results = calculateGameResults(room);
 
-                io.to(room_id).emit('game_over', JSON.stringify({ results }));
+                io.to(room_id).emit('game_over', JSON.stringify(results));
                 // console.log(`[GAME_OVER] Room ${room_id} finished`);
 
                 // Clean up room after delay
@@ -623,10 +664,21 @@ io.on('connection', (socket) => {
                 rooms.delete(room_id);
                 // console.log(`[CLEANUP] Empty room ${room_id} deleted`);
             } else if (activeCount === 1 && room.status === GAME_STATUS.PLAYING) {
-                // Only 1 player left, end game
+                // Only 1 player left, auto win
                 clearTurnTimer(room);
                 room.status = GAME_STATUS.FINISHED;
-                io.to(room_id).emit('game_over', JSON.stringify({ reason: 'Players left' }));
+
+                // Find remaining player and mark as winner
+                const winner = room.players.find(p => p.status === PLAYER_STATUS.PLAYING);
+                if (winner) {
+                    winner.status = PLAYER_STATUS.WIN;
+                    io.to(room_id).emit('win_game', JSON.stringify(winner.peerId));
+                }
+
+                // Send game over with full results
+                const results = calculateGameResults(room);
+                io.to(room_id).emit('game_over', JSON.stringify(results));
+                console.log(`[GAME_OVER] Players left - Results: ${JSON.stringify(results)}`);
             }
 
         } catch (error) {
