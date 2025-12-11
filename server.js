@@ -125,7 +125,7 @@ function startTurnTimer(room) {
             if (currentPlayer.numoftimeout >= 3) {
                 currentPlayer.status = PLAYER_STATUS.TIMEOUT;
                 io.to(room.roomId).emit('user_timeout', JSON.stringify(currentPlayer.peerId));
-                console.log(`[TIMEOUT] Player ${currentPlayer.userName} marked as timeout`);
+                // console.log(`[TIMEOUT] Player ${currentPlayer.userName} marked as timeout`);
             }
 
             // Auto change turn
@@ -134,7 +134,7 @@ function startTurnTimer(room) {
                 room.currentTurn = nextTurn;
                 const nextPlayer = room.players[nextTurn];
                 io.to(room.roomId).emit('turn_changed', JSON.stringify(nextPlayer.peerId));
-                console.log(`[AUTO_TURN_CHANGE] Room ${room.roomId}, Next turn: Peer ${nextPlayer.peerId}`);
+                // console.log(`[AUTO_TURN_CHANGE] Room ${room.roomId}, Next turn: Peer ${nextPlayer.peerId}`);
 
                 // Start timer for next turn
                 startTurnTimer(room);
@@ -180,7 +180,7 @@ io.on('connection', (socket) => {
             const authToken = `token_${user_id}_${Date.now()}`;
 
             socket.emit('auth_token', authToken);
-            console.log(`[ADD_USER] User added: ${user_name} (${user_id})`);
+            // console.log(`[ADD_USER] User added: ${user_name} (${user_id})`);
 
         } catch (error) {
             console.error('[ADD_USER] Error:', error);
@@ -213,7 +213,7 @@ io.on('connection', (socket) => {
             const bet_amount = jsonData.room_coin_value; // Client sends "room_coin_value"
             const player_count = jsonData.room_players_size; // Client sends "room_players_size"
 
-            console.log(`[REQUEST_JOIN] ${user_name} looking for ${player_count}P room with bet ${bet_amount}`);
+            // console.log(`[REQUEST_JOIN] ${user_name} looking for ${player_count}P room with bet ${bet_amount}`);
 
             // Find available room
             let room = findAvailableRoom(bet_amount, player_count);
@@ -223,7 +223,7 @@ io.on('connection', (socket) => {
                 const roomId = uuidv4();
                 room = createRoom(roomId, user_id, bet_amount, player_count);
                 rooms.set(roomId, room);
-                console.log(`[CREATE_ROOM] New room created: ${roomId}`);
+                // console.log(`[CREATE_ROOM] New room created: ${roomId}`);
             }
 
             // Add player to room
@@ -234,7 +234,7 @@ io.on('connection', (socket) => {
             socket.join(room.roomId);
             socket.currentRoomId = room.roomId;
 
-            console.log(`[PLAYER_JOINED] ${user_name} joined room ${room.roomId} as peer ${player.peerId}`);
+            // console.log(`[PLAYER_JOINED] ${user_name} joined room ${room.roomId} as peer ${player.peerId}`);
 
             // If room is full, start game
             if (room.players.length === room.maxPlayers) {
@@ -268,7 +268,7 @@ io.on('connection', (socket) => {
                 };
 
                 io.to(room.roomId).emit('game_start', JSON.stringify(gameStartData));
-                console.log(`[GAME_START] Room ${room.roomId} started with ${room.players.length} players`);
+                // console.log(`[GAME_START] Room ${room.roomId} started with ${room.players.length} players`);
 
                 // Start turn timer for first player
                 startTurnTimer(room);
@@ -301,7 +301,7 @@ io.on('connection', (socket) => {
             socket.currentRoomId = roomId;
 
             socket.emit('friend_room_code', JSON.stringify({ room_code: roomId }));
-            console.log(`[FRIEND_CREATE] Room created: ${roomId} by ${user_name}`);
+            // console.log(`[FRIEND_CREATE] Room created: ${roomId} by ${user_name}`);
 
         } catch (error) {
             console.error('[FRIEND_CREATE] Error:', error);
@@ -345,7 +345,7 @@ io.on('connection', (socket) => {
                 max_players: room.maxPlayers
             }));
 
-            console.log(`[FRIEND_JOIN] ${user_name} joined room ${room_code}`);
+            // console.log(`[FRIEND_JOIN] ${user_name} joined room ${room_code}`);
 
             // Start game if room full
             if (room.players.length === room.maxPlayers) {
@@ -405,7 +405,7 @@ io.on('connection', (socket) => {
                 dice_face: dice_face
             }));
 
-            console.log(`[DICE] Room ${room_id}, Peer ${peer_id} rolled ${dice_face}`);
+            // console.log(`[DICE] Room ${room_id}, Peer ${peer_id} rolled ${dice_face}`);
 
         } catch (error) {
             console.error('[DICE_SEND] Error:', error);
@@ -452,8 +452,10 @@ io.on('connection', (socket) => {
         try {
             const { room_id, peer_id, token_id, token_value } = JSON.parse(data);
 
-            // Broadcast token reset
-            io.to(room_id).emit('token_recieved', JSON.stringify({
+            // Broadcast token reset to OTHER players only (not sender)
+            // peer_id is the player whose token got KILLED (should receive reset)
+            // socket.to(room_id) excludes sender, so only the killed player receives it
+            socket.to(room_id).emit('token_recieved', JSON.stringify({
                 peer_id: peer_id,
                 token_id: token_id,
                 token_value: token_value,
@@ -493,7 +495,7 @@ io.on('connection', (socket) => {
             const currentPlayer = room.players[nextTurn];
             io.to(room_id).emit('turn_changed', JSON.stringify(currentPlayer.peerId));
 
-            console.log(`[TURN_CHANGE] Room ${room_id}, Turn changed to peer ${currentPlayer.peerId}`);
+            // console.log(`[TURN_CHANGE] Room ${room_id}, Turn changed to peer ${currentPlayer.peerId}`);
 
             // Start timer for next turn
             startTurnTimer(room);
@@ -540,12 +542,12 @@ io.on('connection', (socket) => {
                 }));
 
                 io.to(room_id).emit('game_over', JSON.stringify({ results }));
-                console.log(`[GAME_OVER] Room ${room_id} finished`);
+                // console.log(`[GAME_OVER] Room ${room_id} finished`);
 
                 // Clean up room after delay
                 setTimeout(() => {
                     rooms.delete(room_id);
-                    console.log(`[CLEANUP] Room ${room_id} deleted`);
+                    // console.log(`[CLEANUP] Room ${room_id} deleted`);
                 }, 10000);
             }
 
@@ -573,7 +575,7 @@ io.on('connection', (socket) => {
             // Broadcast leave
             socket.to(room_id).emit('leave_room', JSON.stringify(peer_id));
 
-            console.log(`[LEAVE] Peer ${peer_id} left room ${room_id}`);
+            // console.log(`[LEAVE] Peer ${peer_id} left room ${room_id}`);
 
             // Check if game should end
             const activeCount = room.players.filter(p =>
@@ -583,7 +585,7 @@ io.on('connection', (socket) => {
             if (activeCount === 0 || (room.status === GAME_STATUS.WAITING && room.players.length === 0)) {
                 clearTurnTimer(room); // Clear timer before deleting room
                 rooms.delete(room_id);
-                console.log(`[CLEANUP] Empty room ${room_id} deleted`);
+                // console.log(`[CLEANUP] Empty room ${room_id} deleted`);
             } else if (activeCount === 1 && room.status === GAME_STATUS.PLAYING) {
                 // Only 1 player left, end game
                 clearTurnTimer(room);
