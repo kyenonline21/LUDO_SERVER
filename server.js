@@ -302,59 +302,8 @@ io.on('connection', (socket) => {
         try {
             const { user_id, user_name, fcm_token } = JSON.parse(data);
 
-            let userData;
-
-            // Try Redis first
-            if (isRedisConnected()) {
-                userData = await getUser(user_id);
-
-                if (!userData) {
-                    // New user - create with default values
-                    userData = {
-                        userId: user_id,
-                        userName: user_name,
-                        fcmToken: fcm_token,
-                        coins: 1000,
-                        level: 1,
-                        winCount: 0,
-                        lostCount: 0,
-                        totalGamesPlayed: 0,
-                        createdAt: Date.now()
-                    };
-                    await saveUser(user_id, userData);
-                    console.log(`[NEW_USER] Created: ${user_name} with 1000 coins (Redis)`);
-                } else {
-                    // Existing user - update name and token
-                    userData.userName = user_name;
-                    userData.fcmToken = fcm_token;
-                    await saveUser(user_id, userData);
-                    console.log(`[RETURNING_USER] ${user_name} - Coins: ${userData.coins}, W/L: ${userData.winCount}/${userData.lostCount} (Redis)`);
-                }
-            } else {
-                // Fallback to in-memory
-                userData = users.get(user_id);
-
-                if (!userData) {
-                    userData = {
-                        userId: user_id,
-                        userName: user_name,
-                        fcmToken: fcm_token,
-                        coins: 1000,
-                        level: 1,
-                        winCount: 0,
-                        lostCount: 0,
-                        totalGamesPlayed: 0,
-                        createdAt: Date.now()
-                    };
-                    users.set(user_id, userData);
-                    console.log(`[NEW_USER] Created: ${user_name} with 1000 coins (Memory)`);
-                } else {
-                    userData.userName = user_name;
-                    userData.fcmToken = fcm_token;
-                    console.log(`[RETURNING_USER] ${user_name} - Coins: ${userData.coins}, W/L: ${userData.winCount}/${userData.lostCount} (Memory)`);
-                }
-            }
-
+            // Chỉ lưu socket mapping, không tạo user data ở đây
+            // User data sẽ được tạo khi gọi get_userdata
             userSockets.set(user_id, socket.id);
             socket.userId = user_id;
 
@@ -362,6 +311,7 @@ io.on('connection', (socket) => {
             const authToken = `token_${user_id}_${Date.now()}`;
 
             socket.emit('auth_token', authToken);
+            console.log(`[ADD_USER] User ${user_name} (${user_id}) connected - Socket: ${socket.id}`);
 
         } catch (error) {
             console.error('[ADD_USER] Error:', error);
@@ -372,29 +322,53 @@ io.on('connection', (socket) => {
     // ===== GET USER DATA =====
     socket.on('get_userdata', async (data) => {
         try {
-            const { user_id } = JSON.parse(data);
+            const { user_id, user_name } = JSON.parse(data);
 
             // Try Redis first
             let user = isRedisConnected() ? await getUser(user_id) : users.get(user_id);
 
-            if (user) {
-                // Return full user data including coins and stats
-                const userData = {
-                    user_id: user.userId,
-                    user_name: user.userName,
-                    user_coin: user.coins,
-                    numof_win: user.winCount,
-                    numof_lose: user.lostCount,
-                    user_level: user.level,
-                    total_games: user.totalGamesPlayed || 0
+            // Nếu chưa có user, tạo mới với giá trị mặc định
+            if (!user) {
+                // const userName = `Guest${Math.floor(Math.random() * 10000)}`;
+                user = {
+                    userId: user_id,
+                    userName: user_name,
+                    fcmToken: '',
+                    coins: 1000,
+                    level: 1,
+                    winCount: 0,
+                    lostCount: 0,
+                    totalGamesPlayed: 0,
+                    createdAt: Date.now()
                 };
-                socket.emit('user_data', JSON.stringify(userData));
-                console.log(`[GET_USERDATA] ${user.userName} - Coins: ${user.coins}`);
+
+                // Save to Redis or Memory
+                if (isRedisConnected()) {
+                    await saveUser(user_id, user);
+                    console.log(`[NEW_USER] Created via get_userdata: ${userName} (${user_id}) with 1000 coins (Redis)`);
+                } else {
+                    users.set(user_id, user);
+                    console.log(`[NEW_USER] Created via get_userdata: ${userName} (${user_id}) with 1000 coins (Memory)`);
+                }
             } else {
-                socket.emit('error', { message: 'User not found' });
+                console.log(`[GET_USERDATA] ${user.userName} - Coins: ${user.coins}, W/L: ${user.winCount}/${user.lostCount}`);
             }
+
+            // Return full user data including coins and stats
+            const userData = {
+                user_id: user.userId,
+                user_name: user.userName,
+                user_coin: user.coins,
+                numof_win: user.winCount,
+                numof_lose: user.lostCount,
+                user_level: user.level,
+                total_games: user.totalGamesPlayed || 0
+            };
+            socket.emit('user_data', JSON.stringify(userData));
+
         } catch (error) {
             console.error('[GET_USERDATA] Error:', error);
+            socket.emit('error', { message: 'Failed to get user data' });
         }
     });
 
