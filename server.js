@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
+require('dotenv').config();  // Load environment variables
 
 const app = express();
 const server = http.createServer(app);
@@ -13,8 +14,22 @@ const io = new Server(server, {
     transports: ['websocket', 'polling']
 });
 
-// ===== IN-MEMORY STORAGE (Thay bằng database trong production) =====
-const users = new Map(); // userId -> userData
+// ===== REDIS CLIENT =====
+const {
+    isRedisConnected,
+    getUser,
+    saveUser,
+    deleteUser,
+    getAllUsers,
+    updateUserCoins,
+    updateUserStats,
+    updateLeaderboard,
+    getTopPlayers,
+    getDatabaseSize
+} = require('./redis-client');
+
+// ===== IN-MEMORY STORAGE (Fallback nếu Redis không available) =====
+const users = new Map(); // userId -> userData (fallback)
 const rooms = new Map(); // roomId -> roomData
 const userSockets = new Map(); // userId -> socketId
 
@@ -107,7 +122,7 @@ function startTurnTimer(room) {
     }
 
     // Set new timer for current turn
-    room.turnTimer = setTimeout(() => {
+    room.turnTimer = setTimeout(async () => {
         console.log(`[TURN_TIMEOUT] Room ${room.roomId}, Peer ${room.players[room.currentTurn]?.peerId} timeout`);
 
         const currentPlayer = room.players[room.currentTurn];
@@ -146,8 +161,9 @@ function startTurnTimer(room) {
                         room.status = GAME_STATUS.FINISHED;
 
                         // Send game over with full ranking
-                        setTimeout(() => {
+                        setTimeout(async () => {
                             const results = calculateGameResults(room);
+                            await updatePlayerCoinsAndStats(room, results);
                             io.to(room.roomId).emit('game_over', JSON.stringify(results));
                             console.log(`[GAME_OVER] Results: ${JSON.stringify(results)}`);
                         }, 2000); // Give 2 seconds to show win animation
@@ -158,6 +174,7 @@ function startTurnTimer(room) {
                     // All players timeout
                     clearTurnTimer(room);
                     const results = calculateGameResults(room);
+                    await updatePlayerCoinsAndStats(room, results);
                     io.to(room.roomId).emit('game_over', JSON.stringify(results));
                     console.log(`[GAME_OVER] All timeout - Results: ${JSON.stringify(results)}`);
                     return;
@@ -178,6 +195,7 @@ function startTurnTimer(room) {
                 // No active players - game over
                 clearTurnTimer(room);
                 const results = calculateGameResults(room);
+                await updatePlayerCoinsAndStats(room, results);
                 io.to(room.roomId).emit('game_over', JSON.stringify(results));
                 console.log(`[GAME_OVER] No active players - Results: ${JSON.stringify(results)}`);
             }
@@ -235,25 +253,107 @@ function calculateGameResults(room) {
     return results;
 }
 
+// Update player coins and stats after game ends
+async function updatePlayerCoinsAndStats(room, results) {
+    for (const result of results) {
+        let user;
+
+        // Get user from Redis or Memory
+        if (isRedisConnected()) {
+            user = await getUser(result.user_id);
+        } else {
+            user = users.get(result.user_id);
+        }
+
+        if (!user) continue;
+
+        // Add winning coins
+        user.coins += result.winning_coin;
+
+        // Update stats
+        user.totalGamesPlayed = (user.totalGamesPlayed || 0) + 1;
+
+        if (result.player_status === PLAYER_STATUS.WIN) {
+            user.winCount++;
+            // Level up every 10 wins
+            user.level = Math.floor(1 + (user.winCount / 10));
+        } else {
+            user.lostCount++;
+        }
+
+        // Save back to storage
+        if (isRedisConnected()) {
+            await saveUser(result.user_id, user);
+            await updateLeaderboard(result.user_id, user.winCount);
+        } else {
+            users.set(result.user_id, user);
+        }
+
+        console.log(`[COINS_UPDATE] ${user.userName}: +${result.winning_coin} (Total: ${user.coins}) | W/L: ${user.winCount}/${user.lostCount}`);
+    }
+}
+
 // ===== SOCKET.IO CONNECTION =====
 io.on('connection', (socket) => {
     console.log(`[CONNECT] Socket connected: ${socket.id}`);
 
     // ===== USER AUTHENTICATION =====
-    socket.on('add_user', (data) => {
+    socket.on('add_user', async (data) => {
         try {
             const { user_id, user_name, fcm_token } = JSON.parse(data);
 
-            // Store user data
-            users.set(user_id, {
-                userId: user_id,
-                userName: user_name,
-                fcmToken: fcm_token,
-                coins: 1000, // Default coins
-                level: 1,
-                winCount: 0,
-                lostCount: 0
-            });
+            let userData;
+
+            // Try Redis first
+            if (isRedisConnected()) {
+                userData = await getUser(user_id);
+
+                if (!userData) {
+                    // New user - create with default values
+                    userData = {
+                        userId: user_id,
+                        userName: user_name,
+                        fcmToken: fcm_token,
+                        coins: 1000,
+                        level: 1,
+                        winCount: 0,
+                        lostCount: 0,
+                        totalGamesPlayed: 0,
+                        createdAt: Date.now()
+                    };
+                    await saveUser(user_id, userData);
+                    console.log(`[NEW_USER] Created: ${user_name} with 1000 coins (Redis)`);
+                } else {
+                    // Existing user - update name and token
+                    userData.userName = user_name;
+                    userData.fcmToken = fcm_token;
+                    await saveUser(user_id, userData);
+                    console.log(`[RETURNING_USER] ${user_name} - Coins: ${userData.coins}, W/L: ${userData.winCount}/${userData.lostCount} (Redis)`);
+                }
+            } else {
+                // Fallback to in-memory
+                userData = users.get(user_id);
+
+                if (!userData) {
+                    userData = {
+                        userId: user_id,
+                        userName: user_name,
+                        fcmToken: fcm_token,
+                        coins: 1000,
+                        level: 1,
+                        winCount: 0,
+                        lostCount: 0,
+                        totalGamesPlayed: 0,
+                        createdAt: Date.now()
+                    };
+                    users.set(user_id, userData);
+                    console.log(`[NEW_USER] Created: ${user_name} with 1000 coins (Memory)`);
+                } else {
+                    userData.userName = user_name;
+                    userData.fcmToken = fcm_token;
+                    console.log(`[RETURNING_USER] ${user_name} - Coins: ${userData.coins}, W/L: ${userData.winCount}/${userData.lostCount} (Memory)`);
+                }
+            }
 
             userSockets.set(user_id, socket.id);
             socket.userId = user_id;
@@ -262,7 +362,6 @@ io.on('connection', (socket) => {
             const authToken = `token_${user_id}_${Date.now()}`;
 
             socket.emit('auth_token', authToken);
-            // console.log(`[ADD_USER] User added: ${user_name} (${user_id})`);
 
         } catch (error) {
             console.error('[ADD_USER] Error:', error);
@@ -271,13 +370,26 @@ io.on('connection', (socket) => {
     });
 
     // ===== GET USER DATA =====
-    socket.on('get_userdata', (data) => {
+    socket.on('get_userdata', async (data) => {
         try {
             const { user_id } = JSON.parse(data);
-            const user = users.get(user_id);
+
+            // Try Redis first
+            let user = isRedisConnected() ? await getUser(user_id) : users.get(user_id);
 
             if (user) {
-                socket.emit('user_data', JSON.stringify(user));
+                // Return full user data including coins and stats
+                const userData = {
+                    user_id: user.userId,
+                    user_name: user.userName,
+                    user_coin: user.coins,
+                    numof_win: user.winCount,
+                    numof_lose: user.lostCount,
+                    user_level: user.level,
+                    total_games: user.totalGamesPlayed || 0
+                };
+                socket.emit('user_data', JSON.stringify(userData));
+                console.log(`[GET_USERDATA] ${user.userName} - Coins: ${user.coins}`);
             } else {
                 socket.emit('error', { message: 'User not found' });
             }
@@ -287,7 +399,7 @@ io.on('connection', (socket) => {
     });
 
     // ===== MATCHMAKING - REQUEST JOIN ROOM =====
-    socket.on('request_join', (data) => {
+    socket.on('request_join', async (data) => {
         try {
             const jsonData = JSON.parse(data);
             const user_id = jsonData.user_id;
@@ -295,7 +407,34 @@ io.on('connection', (socket) => {
             const bet_amount = jsonData.room_coin_value; // Client sends "room_coin_value"
             const player_count = jsonData.room_players_size; // Client sends "room_players_size"
 
-            // console.log(`[REQUEST_JOIN] ${user_name} looking for ${player_count}P room with bet ${bet_amount}`);
+            // Check if user has enough coins (Redis or Memory)
+            let user = isRedisConnected() ? await getUser(user_id) : users.get(user_id);
+
+            if (!user) {
+                socket.emit('error', JSON.stringify({ message: 'User not found' }));
+                return;
+            }
+
+            if (user.coins < bet_amount) {
+                socket.emit('insufficient_coins', JSON.stringify({
+                    required: bet_amount,
+                    current: user.coins
+                }));
+                console.log(`[JOIN_FAILED] ${user_name} insufficient coins: ${user.coins}/${bet_amount}`);
+                return;
+            }
+
+            // Deduct bet amount from user coins
+            user.coins -= bet_amount;
+
+            // Save back to storage
+            if (isRedisConnected()) {
+                await saveUser(user_id, user);
+            } else {
+                users.set(user_id, user);
+            }
+
+            console.log(`[COINS_DEDUCTED] ${user_name}: -${bet_amount} (Remaining: ${user.coins})`);
 
             // Find available room
             let room = findAvailableRoom(bet_amount, player_count);
@@ -363,7 +502,7 @@ io.on('connection', (socket) => {
     });
 
     // ===== FRIEND ROOM - CREATE =====
-    socket.on('friend_create_room', (data) => {
+    socket.on('friend_create_room', async (data) => {
         try {
             const jsonData = JSON.parse(data);
             const user_id = jsonData.user_id;
@@ -371,6 +510,26 @@ io.on('connection', (socket) => {
             const bet_amount = jsonData.room_coin_value; // Client sends "room_coin_value"
             const player_count = jsonData.room_players_size; // Client sends "room_players_size"
             const room_code = jsonData.room_code;
+
+            // Check if user has enough coins
+            const user = users.get(user_id);
+            if (!user) {
+                socket.emit('friend_error_response', { message: 'User not found' });
+                return;
+            }
+
+            if (user.coins < bet_amount) {
+                socket.emit('insufficient_coins', JSON.stringify({
+                    required: bet_amount,
+                    current: user.coins
+                }));
+                console.log(`[FRIEND_CREATE_FAILED] ${user_name} insufficient coins: ${user.coins}/${bet_amount}`);
+                return;
+            }
+
+            // Deduct bet amount
+            user.coins -= bet_amount;
+            console.log(`[COINS_DEDUCTED] ${user_name}: -${bet_amount} (Remaining: ${user.coins})`);
 
             const roomId = room_code || uuidv4().substring(0, 6).toUpperCase();
             const room = createRoom(roomId, user_id, bet_amount, player_count);
@@ -392,7 +551,7 @@ io.on('connection', (socket) => {
     });
 
     // ===== FRIEND ROOM - JOIN =====
-    socket.on('friend_join_room', (data) => {
+    socket.on('friend_join_room', async (data) => {
         try {
             const { user_id, user_name, room_code } = JSON.parse(data);
 
@@ -407,6 +566,27 @@ io.on('connection', (socket) => {
                 socket.emit('friend_error_response', { message: 'Room is full' });
                 return;
             }
+
+            // Check if user has enough coins
+            const user = users.get(user_id);
+            if (!user) {
+                socket.emit('friend_error_response', { message: 'User not found' });
+                return;
+            }
+
+            if (user.coins < room.betAmount) {
+                socket.emit('insufficient_coins', JSON.stringify({
+                    required: room.betAmount,
+                    current: user.coins
+                }));
+                console.log(`[FRIEND_JOIN_FAILED] ${user_name} insufficient coins: ${user.coins}/${room.betAmount}`);
+                return;
+            }
+
+            // Deduct bet amount
+            user.coins -= room.betAmount;
+            console.log(`[COINS_DEDUCTED] ${user_name}: -${room.betAmount} (Remaining: ${user.coins})`);
+
 
             if (room.status !== GAME_STATUS.WAITING) {
                 socket.emit('friend_error_response', { message: 'Game already started' });
@@ -588,7 +768,7 @@ io.on('connection', (socket) => {
     });
 
     // ===== GAME ACTIONS - WIN =====
-    socket.on('win_game', (data) => {
+    socket.on('win_game', async (data) => {
         try {
             const { room_id, peer_id, player_rank } = JSON.parse(data);
             const room = rooms.get(room_id);
@@ -618,6 +798,9 @@ io.on('connection', (socket) => {
                 // Calculate results with ranking and winning coins
                 const results = calculateGameResults(room);
 
+                // Update player coins and stats
+                await updatePlayerCoinsAndStats(room, results);
+
                 io.to(room_id).emit('game_over', JSON.stringify(results));
                 // console.log(`[GAME_OVER] Room ${room_id} finished`);
 
@@ -634,7 +817,7 @@ io.on('connection', (socket) => {
     });
 
     // ===== GAME ACTIONS - LEAVE ROOM =====
-    socket.on('leave_room', (data) => {
+    socket.on('leave_room', async (data) => {
         try {
             const { room_id, peer_id } = JSON.parse(data);
             const room = rooms.get(room_id);
@@ -677,6 +860,7 @@ io.on('connection', (socket) => {
 
                 // Send game over with full results
                 const results = calculateGameResults(room);
+                await updatePlayerCoinsAndStats(room, results);
                 io.to(room_id).emit('game_over', JSON.stringify(results));
                 console.log(`[GAME_OVER] Players left - Results: ${JSON.stringify(results)}`);
             }
